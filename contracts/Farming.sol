@@ -3,60 +3,41 @@ pragma solidity =0.8.17;
 
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
 contract Farming {
-
     using SafeERC20 for IERC20Metadata;
-    using SafeMath for uint256;
 
-    /**
-     * number of users
-     */
-    uint256 public numUsers;
+    struct User {
+        uint256 amount;
+        uint256 depositTime;
+        bool claimed;
+    }
 
-    enum FarmingState {NotInitialized, Active, Expired}
-
-    // uint256 public constant HUNDRED_PERCENT = 10_000; // 100.00%
+    uint256 public constant HUNDRED_PERCENT = 10_000; // 100.00%
 
     address public owner;
 
-    /**
-     * LP token
-     */
-    IERC20Metadata public stakingToken;
+    IERC20Metadata public stakingToken; // LP token
 
-    /**
-     * token A or erc20
-     */
-    IERC20Metadata public rewardToken;
+    IERC20Metadata public rewardToken; // token A or erc20
 
-    uint256 public totalRewardAmount;
+    uint256 public tokensLeft;
 
-    uint256 public rewardPercentage;
+    uint256 public percentage;
 
     uint256 public startTime;
 
-    uint256 public epochLengthInSeconds;
+    uint256 public epochDuration;
 
-    uint256 public numberOfEpochs;
+    uint256 public amountOfEpochs;
 
-    // bool public initialized;
+    bool public initialized;
 
-    mapping (address => UserInfo) public users;
-    mapping (address => uint256) public userIndexes;
-
-    FarmingState public state;
+    mapping (address => User) public users;
 
     event Deposited(address addr, uint256 amount);
-    event Withdraw(address addr, uint256 amount);
-    event RewardClaimed(address addr, uint256 amount);
-
-    struct UserInfo {
-        uint256 stakedAmount;
-        uint256 rewardEarned;
-        uint256 lastInteraction;
-    }
+    event Withdraw(address addr);
+    event Claimed(address addr, uint256 amount);
 
     constructor(address _stakingToken, address _rewardToken) {
         owner = msg.sender;
@@ -69,130 +50,69 @@ contract Farming {
         _;
     }
 
-    /**
-     * sets state to Active
-     */
-    function initializeFarming() external onlyOwner {
-        require(state == FarmingState.NotInitialized, "Already initialized");
-        state = FarmingState.Active;
-    }
-
-    /**
-     * transmits and stores the reward token
-     */
-    function setRewardToken(uint256 amount) external onlyOwner {
-    rewardToken.safeTransferFrom(msg.sender, address(this), amount);
-    }
-
-    /**
-     * sets parameters such as percentages, epoch information, etc.
-     * Input parameter validation:
-     * _totalRewardAmount - 1000 LP tokens, so 1000 * 10^18 (since an LP token has 18 decimal places)
-     * _rewardPercentage - 10% per month, so 10% * 100 (since the contract uses 10000 for 100%) = 1000
-     * _epochLengthInSeconds -  is 1 month, i.e. 30 days. In Solidity, 30 days is 30 * 24 * 60 * 60 = 2592000 seconds. This is the value that is passed in.
-     * _numberOfEpochs - the number of epochs is equal to the term of farming in months, i.e. 3 months.
-     * _startTime - farming start time, i.e. the current time of the blockchain block.timestamp
-     */
-    function configureFarmingParameters(
-        uint256 _totalRewardAmount,
-        uint256 _rewardPercentage,
-        uint256 _epochLengthInSeconds,
-        uint256 _numberOfEpochs,
+    function initialize(
+        uint256 _totalAmount,
+        uint256 _percentage, // 0 ~ 100.00% => 0 ~ 10000
+        uint256 _epochDuration,
+        uint256 _amountOfEpochs,
         uint256 _startTime
     ) external onlyOwner {
-        require(_totalRewardAmount == 1000, "Invalid reward amount");
-        require(_rewardPercentage == 1000, "Invalid reward percentage");
-        require(_epochLengthInSeconds == 2592000, "Invalid epoch length");
-        require(_numberOfEpochs == 3, "Invalid number of epochs");
-        require(_startTime > block.timestamp, "Start time must be in future");
-
-        totalRewardAmount = _totalRewardAmount;
-        rewardPercentage = _rewardPercentage;
-        epochLengthInSeconds = _epochLengthInSeconds;
-        numberOfEpochs = _numberOfEpochs;
+        require(!initialized, "Already initialized");
+        initialized = true;
+        tokensLeft = _totalAmount;
+        percentage = _percentage;
         startTime = _startTime;
+        amountOfEpochs = _amountOfEpochs;
+        epochDuration = _epochDuration;
+
+        rewardToken.safeTransferFrom(
+            msg.sender,
+            address(this),
+            ((_totalAmount * _percentage * _amountOfEpochs) / HUNDRED_PERCENT)
+        );
     }
 
-    function deposit(uint256 amount) external {
-        require(state == FarmingState.Active, "Not active");
-        require(amount > 0, "Invalid amount");
-
-        users[msg.sender].stakedAmount = users[msg.sender].stakedAmount.add(amount);
-        users[msg.sender].lastInteraction = block.timestamp;
-
-        stakingToken.safeTransferFrom(msg.sender, address(this), amount);
-
-        emit Deposited(msg.sender, amount);
-
-        _updateReward(msg.sender);
+    function deposit(uint256 _amount) external {
+        require(startTime <= block.timestamp, "Farming is not up yet!");
+        require(_amount <= tokensLeft, "Too many tokens contributed");
+        users[msg.sender] = User({
+            amount: _amount,
+            depositTime: block.timestamp,
+            claimed: false
+        });
+        tokensLeft -= _amount;
+        stakingToken.safeTransferFrom(msg.sender, address(this), _amount);
+        emit Deposited(msg.sender, _amount);
     }
 
-    function withdraw(uint256 amount) external {
-        require(state == FarmingState.Active, "Not active");
-        require(amount > 0, "Invalid amount");
+    function withdraw() external {
+        User storage user = users[msg.sender];
 
-        users[msg.sender].stakedAmount = users[msg.sender].stakedAmount.sub(amount);
-        users[msg.sender].lastInteraction = block.timestamp;
+        require(user.claimed, "Rewards not claimed");
+
+        uint256 amount = user.amount;
+        user.amount = 0;
 
         stakingToken.safeTransfer(msg.sender, amount);
 
-        emit Withdraw(msg.sender, amount);
-
-        _updateReward(msg.sender);
+        emit Withdraw(msg.sender);
     }
 
-    function claimReward() external {
-    require(state == FarmingState.Active, "Not active");
-    
-    uint256 reward = users[msg.sender].rewardEarned;
-    users[msg.sender].rewardEarned = 0;
+    function claimRewards() external {
+        User storage user = users[msg.sender];
 
-    rewardToken.safeTransfer(msg.sender, reward);
+        require(block.timestamp >= startTime + epochDuration * amountOfEpochs, "Epoch not finished");
+        require(!user.claimed, "Rewards already claimed");
 
-    emit RewardClaimed(msg.sender, reward);
-    }
+        uint256 amount = user.amount;
+        uint256 timeDelta = block.timestamp - user.depositTime;
+        uint256 epochsPassed = timeDelta / epochDuration;
+        uint256 reward = (amount * percentage * epochsPassed) / HUNDRED_PERCENT;
 
-    /**
-     * uses a private internal function to calculate and update user rewards for each interaction
-     */
-    function _updateReward(address user) internal {
-        if(block.timestamp > startTime) {
-            uint256 epochsPassed = (block.timestamp - startTime) / epochLengthInSeconds;
+        user.claimed = true;
+        
+        rewardToken.safeTransfer(msg.sender, reward);
 
-            if (epochsPassed > users[user].lastInteraction) {
-                uint256 reward = calculateRewardForUser(user);
-                users[user].rewardEarned += reward;
-            }
-        }
-    }
-
-    function calculateRewardForUser(address user) public view returns (uint256) {
-        uint256 epochsSinceLast = (block.timestamp - users[user].lastInteraction) / epochLengthInSeconds;
-        uint256 rewardPerEpoch = totalRewardAmount * rewardPercentage / 10000 / numberOfEpochs;
-        return users[user].stakedAmount * epochsSinceLast * rewardPerEpoch / totalStaked();
-    }
-
-    function totalStaked() public view returns (uint256) {
-        uint256 total = 0;
-        for (uint256 i = 0; i < numUsers; i++) {
-        address user = getUserAddress(i);
-        total += users[user].stakedAmount;
-        }
-        return total;
-    }
-
-    function addUser(address newUser) public {
-    require(userIndexes[newUser] == 0, "User already exists");
-    users[newUser] = UserInfo({
-    stakedAmount: 0,
-    rewardEarned: 0,
-    lastInteraction: 0
-    });
-    userIndexes[newUser] = numUsers;
-    numUsers++;
-    }
-
-    function getUserAddress(uint256 index) pure public returns (address) {
-    return address(uint160(index)); 
+        emit Claimed(msg.sender, reward);
     }
 }
