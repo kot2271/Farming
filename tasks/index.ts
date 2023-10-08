@@ -1,1 +1,6 @@
-import "./configureFarming"
+import "./initializeFarming"
+import "./approve"
+import "./deposit"
+import "./approveStaking"
+import "./claim"
+import "./withdraw"
